@@ -235,10 +235,11 @@ stale log entries:
 	method and the message's Term is lower than leader's or candidate's,
 	'MessageType_MsgRequestVote' will be rejected ('MessageType_MsgRequestVoteResponse' is returned with Reject true).
 	If leader or candidate receives 'MessageType_MsgRequestVote' with higher term, it will revert
-	back to follower. When 'MessageType_MsgRequestVote' is passed to follower, it votes for the
+	back to follower. THIS PART MAYBY WRONG<<<<When 'MessageType_MsgRequestVote' is passed to follower, it votes for the
 	sender only when sender's last term is greater than MessageType_MsgRequestVote's term or
 	sender's last term is equal to MessageType_MsgRequestVote's term but sender's last committed
-	index is greater than or equal to follower's.
+	index is greater than or equal to follower's.>>>>, i think it should be: the receiver will compare its logTerm and
+	Index to the message's.
 
 	'MessageType_MsgRequestVoteResponse' contains responses from voting request. When 'MessageType_MsgRequestVoteResponse' is
 	passed to candidate, the candidate calculates how many votes it has won. If

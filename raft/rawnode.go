@@ -70,12 +70,16 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+
+	ready bool
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	return &RawNode{
+		Raft: newRaft(config),
+	}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +147,64 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	// snapshot, err := rn.Raft.RaftLog.storage.Snapshot()
+	// if err != nil {
+	// 	return Ready{}
+	// }
+	entries := rn.Raft.RaftLog.Entries(rn.Raft.RaftLog.stabled+1, rn.Raft.RaftLog.LastIndex()+1)
+	committedEntries := rn.Raft.RaftLog.Entries(rn.Raft.RaftLog.applied+1, rn.Raft.RaftLog.committed+1)
+	// hs, _, err := rn.Raft.RaftLog.storage.InitialState()
+	// if err != nil {
+	// 	return Ready{}
+	// }
+
+	// 没有新的东西需要被处理了，那就不处理Ready
+	if !rn.HasReady() {/*  */
+		return Ready{}
+	}
+
+	res := Ready{
+		// HardState:        hs,
+		Entries: entries,
+		// Snapshot:         snapshot,
+		CommittedEntries: committedEntries,
+		// Messages:         rn.Raft.msgs,
+	}
+	// TODO：需要确认传入了 Messages 之后是否需要清空 Raft 中的 msgs
+	rn.ready = true
+	return res
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	// 1. 没有新消息
+	// 2. 持久化进度追上最新的条目
+	// 3. apply 进度追上 committed 进度
+	if len(rn.Raft.msgs) == 0 &&
+		rn.Raft.RaftLog.stabled == rn.Raft.RaftLog.LastIndex() &&
+		rn.Raft.RaftLog.applied == rn.Raft.RaftLog.committed { /*应该还有 hardstate、将 committed 化为 applied*/
+		return false
+	} else {
+		return true
+	}
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	// Advance 实际上上游对 Ready 中的内容持久化了，所以 RaftLog 中需要把这部分的内容删除掉
+	if len(rd.Entries) != 0 {
+		stabled := rd.Entries[len(rd.Entries)-1].Index
+
+		rn.Raft.RaftLog.stabled = stabled
+	}
+	if len(rd.CommittedEntries) != 0 {
+		applied := rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+
+		rn.Raft.RaftLog.applied = applied
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
