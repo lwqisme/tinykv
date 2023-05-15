@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/log"
 )
 
 // raftWorker is responsible for run raft commands and apply raft logs.
@@ -68,5 +69,6 @@ func (rw *raftWorker) getPeerState(peersMap map[uint64]*peerState, regionID uint
 		}
 		peersMap[regionID] = peer
 	}
+	log.Debugf("qq: into getPeerState, regionID:%v, get peer:%v", regionID, peer.peer.Meta.Id)
 	return peer
 }

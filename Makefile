@@ -83,6 +83,27 @@ project2b:
 	$(GOTEST) ./kv/test_raftstore -run ^TestPersistPartitionUnreliable2B$ || true
 	$(TEST_CLEAN)
 
+basic2b:
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestBasic2B$ || true
+	$(TEST_CLEAN)
+
+concurrent2b:
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestConcurrent2B$ || true
+	$(TEST_CLEAN)
+
+unreliable2b:
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestUnreliable2B$ || true
+	$(TEST_CLEAN)
+
+onepartition2b:
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestOnePartition2B$ || true
+	$(TEST_CLEAN)
+
+
 project2c:
 	$(TEST_CLEAN)
 	$(GOTEST) ./raft -run 2C || true

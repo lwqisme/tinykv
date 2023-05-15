@@ -45,6 +45,8 @@ type Ready struct {
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
+	// 是在发送消息之前要保存到稳定存储的节点的当前状态。
+	// 如果没有更新，则hardState等于空状态。
 	pb.HardState
 
 	// Entries specifies entries to be saved to stable storage BEFORE
@@ -70,8 +72,6 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-
-	ready bool
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -153,25 +153,36 @@ func (rn *RawNode) Ready() Ready {
 	// }
 	entries := rn.Raft.RaftLog.Entries(rn.Raft.RaftLog.stabled+1, rn.Raft.RaftLog.LastIndex()+1)
 	committedEntries := rn.Raft.RaftLog.Entries(rn.Raft.RaftLog.applied+1, rn.Raft.RaftLog.committed+1)
-	// hs, _, err := rn.Raft.RaftLog.storage.InitialState()
-	// if err != nil {
-	// 	return Ready{}
-	// }
+	storehs, _, err := rn.Raft.RaftLog.storage.InitialState()
+	if err != nil {
+		return Ready{}
+	}
+	// 获取目前的 node 状态，待会存进去。
+	hs := pb.HardState{
+		Term:   rn.Raft.Term,
+		Vote:   rn.Raft.Vote,
+		Commit: rn.Raft.RaftLog.committed,
+	}
+	// 如果没有任何状态的更新，那么将传入空的 hardstate。
+	if hs.Term == storehs.Term && hs.Commit == storehs.Commit && hs.Vote == storehs.Vote {
+		hs = pb.HardState{}
+	}
 
 	// 没有新的东西需要被处理了，那就不处理Ready
-	if !rn.HasReady() {/*  */
+	if !rn.HasReady() {
 		return Ready{}
 	}
 
 	res := Ready{
-		// HardState:        hs,
-		Entries: entries,
+		HardState: hs,
+		Entries:   entries,
 		// Snapshot:         snapshot,
 		CommittedEntries: committedEntries,
-		// Messages:         rn.Raft.msgs,
+		Messages:         rn.Raft.msgs,
 	}
-	// TODO：需要确认传入了 Messages 之后是否需要清空 Raft 中的 msgs
-	rn.ready = true
+
+	rn.Raft.msgs = make([]pb.Message, 0)
+
 	return res
 }
 
@@ -181,9 +192,15 @@ func (rn *RawNode) HasReady() bool {
 	// 1. 没有新消息
 	// 2. 持久化进度追上最新的条目
 	// 3. apply 进度追上 committed 进度
-	if len(rn.Raft.msgs) == 0 &&
-		rn.Raft.RaftLog.stabled == rn.Raft.RaftLog.LastIndex() &&
-		rn.Raft.RaftLog.applied == rn.Raft.RaftLog.committed { /*应该还有 hardstate、将 committed 化为 applied*/
+	// hs, _, err := rn.Raft.RaftLog.storage.InitialState()
+	// if err != nil {
+	// 	return false
+	// }
+	if len(rn.Raft.msgs) == 0 && // 消息传完了
+		rn.Raft.RaftLog.stabled == rn.Raft.RaftLog.LastIndex() && // stabled 存到最新了
+		rn.Raft.RaftLog.applied == rn.Raft.RaftLog.committed { // 提交的全都apply了 、
+		// hardState 按照 TestRawNodeStart2AC 的意思，是不需要在 hasReady 中检查 hardstate 是否最新。
+		// 满足以上的四个条件，才算是同步了，没有新的 ready 产生。
 		return false
 	} else {
 		return true
@@ -192,9 +209,10 @@ func (rn *RawNode) HasReady() bool {
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
+// 更新 stabled 和 applied
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
-	// Advance 实际上上游对 Ready 中的内容持久化了，所以 RaftLog 中需要把这部分的内容删除掉
+	// Advance 实际上上游对 Ready 中的内容持久化了，所以 RaftLog 中需要把这部分的内容删除掉?
 	if len(rd.Entries) != 0 {
 		stabled := rd.Entries[len(rd.Entries)-1].Index
 

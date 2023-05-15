@@ -306,8 +306,21 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
+// 将 entries 里的东西放到 writeBatch 里，并且更新 raftState
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
+
 	// Your Code Here (2B).
+	// 数据写入数据库并且更新本地的 state
+	// TODO：需要判断是否连续
+	for _, ent := range entries {
+		err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent)
+		if err != nil {
+			return err
+		}
+		ps.raftState.LastIndex = ent.Index
+		ps.raftState.LastTerm = ent.Term
+	}
+
 	return nil
 }
 
@@ -328,9 +341,33 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 // Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
+// 仅仅是将 ready 中的数据库存储到 disk，不需要管理 region 等信息。
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	wb := engine_util.WriteBatch{}
+
+	err := ps.Append(ready.Entries, &wb)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: 这里后续的应该和 2B 没有什么关系。所以没有调用 ApplySnapshot 。
+	// 更新 HardState 并且将其持久化到 raftdb 当中
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	err = wb.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	if err != nil {
+		return nil, err
+	}
+
+	err = wb.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		panic("write batch SaveReadyState error")
+		return nil, err
+	}
+
 	return nil, nil
 }
 

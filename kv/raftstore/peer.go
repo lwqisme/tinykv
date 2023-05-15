@@ -83,8 +83,9 @@ type peer struct {
 
 	// Record the callback of the proposals
 	// (Used in 2B)
-	proposals []*proposal
-
+	// 所有的 propose（即添加 log 的操作）都需要将其 cb记录到此处，所以可以认为它的 index 是递增的
+	// 但是有 msgHup 的存在，并不是所有的条目都会记录在 proposal，所以需要使用二分查找。
+	proposals map[uint64]*proposal
 	// Index of last scheduled compacted raft log.
 	// (Used in 2C)
 	LastCompactedIdx uint64
@@ -125,12 +126,18 @@ func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, r
 
 	appliedIndex := ps.AppliedIndex()
 
+	peers := make([]uint64, 0)
+	for _, peer := range region.Peers {
+		peers = append(peers, peer.Id)
+	}
+
 	raftCfg := &raft.Config{
 		ID:            meta.GetId(),
 		ElectionTick:  cfg.RaftElectionTimeoutTicks,
 		HeartbeatTick: cfg.RaftHeartbeatTicks,
 		Applied:       appliedIndex,
 		Storage:       ps,
+		Peers:         peers,
 	}
 
 	raftGroup, err := raft.NewRawNode(raftCfg)
@@ -144,6 +151,7 @@ func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, r
 		peerStorage:           ps,
 		peerCache:             make(map[uint64]*metapb.Peer),
 		PeersStartPendingTime: make(map[uint64]time.Time),
+		proposals:             make(map[uint64]*proposal),
 		Tag:                   tag,
 		ticker:                newTicker(region.GetId(), cfg),
 	}

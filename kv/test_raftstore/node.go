@@ -72,6 +72,13 @@ func (t *MockTransport) Send(msg *raft_serverpb.RaftMessage) error {
 
 	for _, filter := range t.filters {
 		if !filter.Before(msg) {
+			// if msg.Message.MsgType == eraftpb.MessageType_MsgRequestVote ||
+			// 	msg.Message.MsgType == eraftpb.MessageType_MsgRequestVoteResponse ||
+			// 	msg.Message.MsgType == eraftpb.MessageType_MsgAppend ||
+			// 	msg.Message.MsgType == eraftpb.MessageType_MsgAppendResponse {
+			// 	log.Infof("qq: message type%v, content %+v is dropped",
+			// 		msg.Message.MsgType, msg)
+			// }
 			return errors.New(fmt.Sprintf("message %+v is dropped", msg))
 		}
 	}
@@ -214,5 +221,6 @@ func (c *NodeSimulator) CallCommandOnStore(storeID uint64, request *raft_cmdpb.R
 	}
 
 	resp := cb.WaitRespWithTimeout(timeout)
+	// 运行到此处 timeout 超时了
 	return resp, cb.Txn
 }

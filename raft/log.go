@@ -49,7 +49,7 @@ type RaftLog struct {
 	stabled uint64
 
 	// all entries that have not yet compact.
-	// compact 应该是很后面的东西，所以此处的entries应该就是所有的entries！
+	// 不包含dummy，因为 storage 的获取 entries 的接口访问到 dummy 条目会报错。
 	entries []pb.Entry
 
 	// the incoming unstable snapshot, if any.
@@ -203,7 +203,8 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 { // 因为内存和 storage 不一定同步，所以不再到 storage 中取
-		return 0
+		// 还是要到 storage 中取，因为 tmd 它初始化的 index 是 5
+		return l.storedLastIndex()
 	}
 	return l.entries[len(l.entries)-1].Index
 }
@@ -211,11 +212,16 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	// 避免获取前置的时候获取到了 dummy
-	if i == 0 {
-		return 0, nil
+	// 在存储中确定了的部分，都到存储中去获取。
+	if i <= l.storedLastIndex() {
+		term, err := l.storage.Term(i)
+		if err != nil {
+			return 0, err
+		}
+		return term, nil
 	}
 
+	// 剩余未确定的部分，在本地 RaftLog 中获取。
 	if i > l.LastIndex() {
 		return 0, errors.New("i pass to Term function out of index")
 	} else {
@@ -268,7 +274,12 @@ func (l *RaftLog) AppendEntries(entries []pb.Entry, term uint64) error {
 	// 		l.LastIndex(), entries[0].Index)
 	// }
 
-	if l.LastIndex()+1 == entries[0].Index {
+	// 这里难道 当本地的 entries 为空时，可以直接添加进去？\
+	// 因为有可能冲突的条都已经持久化了，但是全都冲突了之后去获取 store 的，会获取到冲突的部分的。所以不用管，直接插入。
+	// TODO：这里需要验证
+	if len(l.entries) == 0 {
+		l.entries = append(l.entries, entries...)
+	} else if l.LastIndex()+1 == entries[0].Index {
 		l.entries = append(l.entries, entries...)
 	} else {
 		return fmt.Errorf("appended log entries are not continuous [last: %d, append at: %d]",
@@ -279,6 +290,14 @@ func (l *RaftLog) AppendEntries(entries []pb.Entry, term uint64) error {
 }
 
 func (l *RaftLog) storedLastIndex() uint64 {
+	lastIndex, err := l.storage.LastIndex()
+	if err != nil {
+		return 0
+	}
+	return lastIndex
+}
+
+func (l *RaftLog) storedLastTerm() uint64 {
 	lastIndex, err := l.storage.LastIndex()
 	if err != nil {
 		return 0
@@ -301,6 +320,7 @@ func (l *RaftLog) DealConflict(term, index uint64) (isDel bool) {
 	ents := l.Entries(index, index+1)
 	// if len(ents) == 1 && ents[0].Term < term {
 	// 该函数的执行方是 Follower，所以一切以 leader 为准，只要和 leader 不相同的都删除。
+	// TODO：这里应该可是直接使用 l.Term
 	if len(ents) == 1 && ents[0].Term != term {
 		// 直接删除这一条index往后的所有条
 		if index <= l.stabled {
@@ -318,4 +338,14 @@ func (l *RaftLog) DealConflict(term, index uint64) (isDel bool) {
 		return false
 	}
 	return false
+}
+
+func (l *RaftLog) TempGetStabled() uint64 {
+	return l.stabled
+}
+func (l *RaftLog) TempAllEntries() []pb.Entry {
+	return l.Entries(l.startIndex(), l.LastIndex()+1)
+}
+func (l *RaftLog) TempAppliedAndCommitted() (uint64, uint64) {
+	return l.applied, l.committed
 }

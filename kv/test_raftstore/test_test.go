@@ -60,6 +60,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
 		off := strings.Index(v, wanted)
 		if off < 0 {
+			log.Errorf("qq: %v missing element %v", clnt, wanted)
 			t.Fatalf("%v missing element %v in Append result %v", clnt, wanted, v)
 		}
 		off1 := strings.LastIndex(v, wanted)
@@ -111,7 +112,9 @@ func networkchaos(t *testing.T, cluster *Cluster, ch chan bool, done *int32, unr
 		if unreliable {
 			cluster.AddFilter(&DropFilter{})
 		}
+		log.Debugf("qq: before networkchaos sleep")
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
+		log.Debugf("qq: after networkchaos sleep")
 	}
 }
 
@@ -207,14 +210,12 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
 				} else {
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {

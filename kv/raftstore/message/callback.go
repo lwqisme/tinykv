@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Connor1996/badger"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
 
@@ -35,6 +36,7 @@ func (cb *Callback) WaitRespWithTimeout(timeout time.Duration) *raft_cmdpb.RaftC
 	case <-cb.done:
 		return cb.Resp
 	case <-time.After(timeout):
+		log.Infof("qq: timeout:%v, resp:%v", timeout, cb.Resp)
 		return cb.Resp
 	}
 }

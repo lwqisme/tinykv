@@ -180,6 +180,7 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 	if err != nil {
 		panic(err)
 	}
+
 	return NewPeer(storeID, id)
 }
 
@@ -190,14 +191,24 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
+
+		var cmdtype raft_cmdpb.CmdType
+		if len(req.Requests) != 0 {
+			cmdtype = req.Requests[0].CmdType
+		}
 		if resp == nil {
 			// it should be timeouted innerly
+			log.Infof("qq: request type:%v, key %v no resp, retry %v.", cmdtype, string(key), i)
 			SleepMS(100)
 			continue
 		}
 		if resp.Header.Error != nil {
+			log.Infof("qq: request type:%v, key %v resp error:%v, retry %v.", cmdtype, string(key), resp, i)
 			SleepMS(100)
 			continue
+		}
+		if len(resp.Responses) == 0 {
+			log.Infof("qq: request type:%v, key %v resp.Res.response is nil:%v, retry %v.", cmdtype, string(key), resp, i)
 		}
 		return resp, txn
 	}
@@ -302,11 +313,15 @@ func (c *Cluster) MustPut(key, value []byte) {
 
 func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 	req := NewPutCfCmd(cf, key, value)
+	start := time.Now()
 	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
 	if resp.Header.Error != nil {
 		panic(resp.Header.Error)
 	}
 	if len(resp.Responses) != 1 {
+		past := time.Since(start)
+		log.Errorf("qq: want put cf:%v, key:%v, value:%v, keyBytes:%v, requestTime:%v, past:%v, resp:%v",
+			cf, string(key), string(value), key, start, past, resp)
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
