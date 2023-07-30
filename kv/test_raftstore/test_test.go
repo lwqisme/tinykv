@@ -112,9 +112,9 @@ func networkchaos(t *testing.T, cluster *Cluster, ch chan bool, done *int32, unr
 		if unreliable {
 			cluster.AddFilter(&DropFilter{})
 		}
-		log.Debugf("qq: before networkchaos sleep")
+		log.Infof("qq: before networkchaos sleep")
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
-		log.Debugf("qq: after networkchaos sleep")
+		log.Infof("qq: after networkchaos sleep")
 	}
 }
 
@@ -211,12 +211,14 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					cluster.MustPut([]byte(key), []byte(value))
+					log.Infof("qq: cluster %v finish put key:%v, value:%v", cli, key, value)
 					last = NextValue(last, value)
 					j++
 				} else {
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					values := cluster.Scan([]byte(start), []byte(end))
+					log.Infof("qq: cluster %v finish scan", cli)
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
 						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)

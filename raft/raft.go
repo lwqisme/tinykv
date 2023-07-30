@@ -113,6 +113,8 @@ type Progress struct {
 	Match uint64
 	// Next follower的进度+1
 	Next uint64
+	// LogTerm 对应的peer当中的最后的一个日志的Term。用来给判断majority的。
+	LogTerm uint64
 }
 
 type Raft struct {
@@ -240,20 +242,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 			return false
 		}
 		preTerm = t
-
-		// TODO：为什么不直接用 RaftLog.Term ???????
-		// -------------------------------------------------------------
-		// ents := r.RaftLog.Entries(preIndex, preIndex+1)
-		// log.Debugf("qq: get preEntry error, ents: %v", ents)
-		// if len(ents) != 1 {
-		// 	return false
-		// }
-		// preTerm = ents[0].Term
 	}
-	// log.Debugf("qq: after get preTerm")
 
 	entries := r.RaftLog.Entries(toProgress.Next, r.RaftLog.LastIndex()+1)
-	// TODO：要不要考虑 发出去之后马上更新 Next ？
+	// TODO：要不要考虑 发出去之后马上更新 Next ？目前接收信息时修改。
 	entriesPointers := make([]*pb.Entry, 0)
 	for i := 0; i < len(entries); i++ {
 		entriesPointers = append(entriesPointers, &entries[i])
@@ -364,7 +356,12 @@ func (r *Raft) becomeCandidate() {
 	r.electionElapsed = 0
 	randPlus, _ := rand.Int(rand.Reader, big.NewInt(int64(r.electionTimeout)))
 	r.electionTimeoutPlus = int(randPlus.Int64())
-	log.Infof("qq: %v becomeCandidate and reset electionPlus to %v, electionTime:%v", r.id, r.electionTimeoutPlus, r.electionTimeout)
+
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
+	log.Infof("qq: %v becomeCandidate and reset electionPlus to %v, electionTime:%v, lastIndex:%v, lastLogTerm:%v, lastLog:%v",
+		r.id, r.electionTimeoutPlus, r.electionTimeout, r.RaftLog.LastIndex(), lastIndex, lastTerm, r.RaftLog.Entries(lastIndex, lastIndex+1))
+
 }
 
 // becomeLeader transform this peer's state to leader
@@ -400,7 +397,12 @@ func (r *Raft) becomeLeader() {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
 		// r.RaftLog.applied = r.RaftLog.committed
 	}
-	r.changePrs(addPrsMode, r.id, uint64(len(nilEntries)))
+	r.changePrs(addPrsMode, r.id, uint64(len(nilEntries)), r.Term)
+
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
+	log.Infof("qq: %v becomeLeader and reset electionPlus to %v, electionTime:%v, lastIndex:%v, lastLogTerm:%v, lastLog:%v",
+		r.id, r.electionTimeoutPlus, r.electionTimeout, r.RaftLog.LastIndex(), lastIndex, lastTerm, r.RaftLog.Entries(lastIndex, lastIndex+1))
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -469,7 +471,7 @@ func (r *Raft) Step(m pb.Message) error {
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 	// 我也不知道，term 相等的 leader 之间互相传信息会发生什么
-	if m.Term < r.Term && r.State == StateLeader { // ignore
+	if m.Term < r.Term || r.State == StateLeader { // ignore
 		return
 	}
 	reject := false
@@ -537,15 +539,22 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// r.RaftLog.applied = r.RaftLog.committed
 		}
 
-		r.changePrs(addPrsMode, r.id, uint64(len(ents)))
+		addTerm := uint64(0)
+		if len(ents) > 0 {
+			addTerm = ents[len(ents)-1].Term
+		}
+		r.changePrs(addPrsMode, r.id, uint64(len(ents)), uint64(addTerm))
 	}
 
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: eraftpb.MessageType_MsgAppendResponse,
 		From:    r.id,
 		To:      m.From,
 		Term:    r.Term,
-		Index:   r.RaftLog.LastIndex(),
+		Index:   lastIndex,
+		LogTerm: lastTerm,
 		Reject:  reject,
 	})
 }
@@ -553,7 +562,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleAppendResponse leader接受AppendEndtries的结果
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	if m.Reject { // 如果被拒绝了，就将 nextindex 和 matchindex 都减一重试
-		r.changePrs(minusPrsMode, m.From, 1)
+		// 为什么要减一呢，因为这说明了最新的那个冲突了，或者不存在，所以需要从上一条重新进行，并不是说将这条添加的取消掉
+		// 目前的append是在appendResponse就是下面进行处理的。
+		r.changePrs(minusPrsMode, m.From, 1, 0)
 		r.sendAppend(m.From)
 		return
 	}
@@ -562,31 +573,64 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 
 	// 此时到 Prs 中更新 peers 的进度。
 	index := m.Index
-	r.changePrs(setPrsMode, m.From, index)
+
+	// log.Infof("qq: id:%v into commit, fromId:%v, fromIndex:%v, fromLogterm:%v, nowTerm:%v",
+	// 	r.id, m.From, m.Index, m.LogTerm, r.Term)
+
+	r.changePrs(setPrsMode, m.From, index, m.LogTerm)
 
 	// 只有 index 对应条目在当前的 term 中时，才允许更新committed
 	ents := r.RaftLog.Entries(index, index+1)
 
 	if len(ents) == 1 && ents[0].Term == r.Term {
 		// 使用index剪枝
+		// if index > r.RaftLog.committed {
+		// 	// 统计超过半数的 index，然后更新 leader 的 commited 参数
+		// 	arr := []uint64{r.RaftLog.LastIndex()}
+		// 	for id, progress := range r.Prs {
+		// 		if id != r.id {
+		// 			arr = append(arr, progress.Match)
+		// 		}
+		// 	}
+		// 	sort.Slice(arr, func(i, j int) bool { return arr[i] < arr[j] })
+		// 	majority := arr[(len(arr)-1)/2]
+		// 	if majority > r.RaftLog.committed {
+		// 		// log.Infof("qq: appendResponse update commited to %v", majority)
+		// 		r.RaftLog.committed = majority
+
+		// 		// r.RaftLog.applied = r.RaftLog.committed
+
+		// 		// 一旦 commited 更新了，
+		// 		// 需要将携带Commit信息的MsgAppend消息发送出去
+		// 		r.bcastAppend()
+		// 	}
+		// }
+		// ----------------------------------------------------
 		if index > r.RaftLog.committed {
-			// 统计超过半数的 index，然后更新 leader 的 commited 参数
 			arr := []uint64{r.RaftLog.LastIndex()}
+			arrPrs := []Progress{}
 			for id, progress := range r.Prs {
-				if id != r.id {
+				arrPrs = append(arrPrs, *progress)
+				// 传入的消息的 Logterm 与当前的 Term 相同就可以了。因为当前的机器里的日志的Term也是这个Term
+				if id != r.id && progress.LogTerm == r.Term {
 					arr = append(arr, progress.Match)
 				}
 			}
-			sort.Slice(arr, func(i, j int) bool { return arr[i] < arr[j] })
-			majority := arr[(len(arr)-1)/2]
+			// log.Infof("qq: id:%v into commit, fromIndex:%v, fromLogterm:%v, nowTerm:%v, Prs:%v, arr:%v",
+			// 	r.id, m.Index, m.LogTerm, r.Term, arrPrs, arr)
+			// log.Infof("qq: id:%v into commit, response fromIndex:%v, commited:%v, fromLogterm:%v, nowTerm:%v, arr:%v", r.id, index, r.RaftLog.committed, m.LogTerm, r.Term, arr)
+
+			if len(arr) <= len(r.Prs)/2 {
+				return
+			}
+
+			// desc
+			sort.Slice(arr, func(i, j int) bool { return arr[i] > arr[j] })
+
+			majority := arr[len(r.Prs)/2]
 			if majority > r.RaftLog.committed {
-				log.Infof("qq: appendResponse update commited to %v", majority)
+				// log.Infof("qq: id:%v, update commited to %v", r.id, majority)
 				r.RaftLog.committed = majority
-
-				// r.RaftLog.applied = r.RaftLog.committed
-
-				// 一旦 commited 更新了，
-				// 需要将携带Commit信息的MsgAppend消息发送出去
 				r.bcastAppend()
 			}
 		}
@@ -612,9 +656,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 			r.becomeFollower(m.Term, m.From)
 			r.RaftLog.committed = m.Commit
 		} else { // follower
-			if m.Term > r.Term {
-				r.Lead = m.From
-			}
+			// if m.Term > r.Term {
+			r.Lead = m.From
+			// }
 		}
 	} else if m.Term < r.Term { // 当 m.Term <= r.Term 时，代表 heartbeat 是过时的或者正在进行时
 		return
@@ -637,18 +681,25 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.electionElapsed = 0 // 然后需要将election倒计时重置
 
 	if r.Term != m.Term {
-		log.Infof("qq: id:%v heartbeat from %v update term from %v to %v", r.id, m.From, r.Term, m.Term)
+		log.Infof("qq: id:%v heartbeat from %v update term from %v to %v, lastIndex:%v", r.id, m.From, r.Term, m.Term, r.RaftLog.LastIndex())
 	}
 	r.Term = m.Term // 设置term
 
+	if r.Lead != m.From {
+		r.Lead = m.From
+	}
+
 	// 发送heartbeat的回复
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.From,
 		From:    r.id,
 		Reject:  reject,
 		Term:    r.Term,
-		Index:   r.RaftLog.LastIndex(),
+		Index:   lastIndex,
+		LogTerm: lastTerm,
 	})
 }
 
@@ -670,20 +721,30 @@ func (r *Raft) isUpToDate(logTerm, logIndex uint64) int {
 		if lastIndex == 0 {
 			return equal
 		} else if logTerm <= lastTerm {
+			log.Infof("qq: fromLogTerm not up to date")
 			return older
 		} else {
 			return newer
 		}
 	}
 
-	ents := r.RaftLog.Entries(logIndex, logIndex+1)
+	// ents := r.RaftLog.Entries(logIndex, logIndex+1)
 
-	if (len(ents) == 1 && (logTerm < ents[0].Term || (logTerm == ents[0].Term && logIndex < r.RaftLog.LastIndex()))) ||
-		(len(ents) == 0 && (logTerm < lastTerm)) {
-		// 来源不是 up-to-date
+	// if (len(ents) == 1 && (logTerm < ents[0].Term || (logTerm == ents[0].Term && logIndex < lastIndex))) ||
+	// 	(len(ents) == 0 && (logTerm < lastTerm)) {
+	// 	// 来源不是 up-to-date
+	// 	log.Infof("qq: fromLogIndex not up to date, fromLogTerm:%v, fromLogIndex:%v, ents:%v", logTerm, logIndex, ents)
+	// 	return older
+	// } else if len(ents) == 1 && logIndex == lastIndex && logTerm == ents[0].Term {
+	// 	// 传入的 term, index 与本地最新的是相同的
+	// 	return equal
+	// } else {
+	// 	return newer
+	// }
+	if logTerm < lastTerm || (logTerm == lastTerm && logIndex < lastIndex) {
+		log.Infof("qq: not up to date, logTerm:%v lastTerm:%v logIndex:%v lastIndex:%v", logTerm, lastTerm, logIndex, lastIndex)
 		return older
-	} else if len(ents) == 1 && logIndex == r.RaftLog.LastIndex() && logTerm == ents[0].Term {
-		// 传入的 term, index 与本地最新的是相同的
+	} else if logIndex == lastIndex && logTerm == lastTerm {
 		return equal
 	} else {
 		return newer
@@ -775,7 +836,7 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	switch r.isUpToDate(m.LogTerm, m.Index) {
 	case older:
 		reject = true
-		log.Infof("qq: id:%v reject vote because not uptodate", r.id)
+		log.Infof("qq: id:%v reject vote from:%d because not uptodate, fromLogTerm:%d, fromIndex:%d, ", r.id, m.From, m.LogTerm, m.Index)
 	default:
 		reject = false
 	}
@@ -805,8 +866,8 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 			log.Infof("qq: id:%v reject vote because just vote other peer:%v", r.id, r.Vote)
 		}
 	} else {
-		if reject {
-			log.Infof("qq: id:%v reject vote because the from term:%v smaller than mine:%v", r.id, m.Term, r.Term)
+		if !reject {
+			log.Infof("qq: id:%v reject vote because the from term:%v smaller than mine:%v", r.id, r.Term, m.Term)
 		}
 		reject = true
 	}
@@ -815,8 +876,11 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	if !reject {
 		r.electionElapsed = 0
 	}
-	log.Infof("qq: id:%v into handle vote, from:%v, selfState:%v, reject:%v, electionEl:%v, electionEnd:%v, from.term:%v, r.term:%v", r.id,
-		m.From, r.State, reject, r.electionElapsed, r.electionTimeout+r.electionTimeoutPlus, m.Term, r.Term)
+
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
+	log.Infof("qq: id:%v into handle vote, from:%v, selfState:%v, reject:%v, electionEl:%v, electionEnd:%v, from.term:%v, r.term:%v, lastLogIndex:%v, lastTerm:%v, fromLogIndex:%v, fromLogTerm", r.id,
+		m.From, r.State, reject, r.electionElapsed, r.electionTimeout+r.electionTimeoutPlus, m.Term, r.Term, lastIndex, lastTerm, m.Index, m.LogTerm)
 
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
@@ -930,6 +994,7 @@ func (r *Raft) redirctPropose(m pb.Message) error {
 }
 
 // handlePropose the leader append a new entry to Log from RPC request.
+// only leader can do.
 func (r *Raft) handlePropose(m pb.Message) error {
 	// 走到此函数时，本node应该为leader状态
 	if len(m.Entries) != 0 {
@@ -951,7 +1016,12 @@ func (r *Raft) handlePropose(m pb.Message) error {
 		if err != nil {
 			return err
 		}
-		r.changePrs(addPrsMode, r.id, uint64(len(ents)))
+
+		addTerm := uint64(0)
+		if len(ents) != 0 {
+			addTerm = ents[len(ents)-1].Term
+		}
+		r.changePrs(addPrsMode, r.id, uint64(len(ents)), addTerm)
 
 		r.bcastAppend()
 
@@ -966,8 +1036,8 @@ func (r *Raft) handlePropose(m pb.Message) error {
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
-	if m.Index != r.RaftLog.LastIndex() {
-		r.changePrs(setPrsMode, m.From, m.Index)
+	if m.Index != r.Prs[m.From].Match || m.LogTerm != r.Prs[m.From].LogTerm {
+		r.changePrs(setPrsMode, m.From, m.Index, m.LogTerm)
 		// TODO：这里是否有点多余了，因为发送heartbeat的时候检查了一遍，然后接收到response又检查一遍。
 		r.sendAppend(m.From)
 	}
@@ -999,8 +1069,9 @@ const (
 	minusPrsMode
 )
 
-func (r *Raft) changePrs(mode int, id, val uint64) {
+func (r *Raft) changePrs(mode int, id, val, term uint64) {
 	if r.State != StateLeader {
+		// ???不是应该允许自己修改自己的吗
 		return
 	}
 	if mode == setPrsMode {
@@ -1011,4 +1082,6 @@ func (r *Raft) changePrs(mode int, id, val uint64) {
 		r.Prs[id].Match -= val
 	}
 	r.Prs[id].Next = r.Prs[id].Match + 1
+
+	r.Prs[id].LogTerm = term
 }

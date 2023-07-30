@@ -98,10 +98,14 @@ unreliable2b:
 	$(GOTEST) ./kv/test_raftstore -run ^TestUnreliable2B$ || true
 	$(TEST_CLEAN)
 
-onepartition2b:
-	$(TEST_CLEAN)
-	$(GOTEST) ./kv/test_raftstore -run ^TestOnePartition2B$ || true
-	$(TEST_CLEAN)
+manytimes:
+	number=1 ; while [[ $$number -le 10 ]] ; do \
+		echo $$number ; \
+		$(TEST_CLEAN); \
+		$(GOTEST) ./kv/test_raftstore -run ^TestPersistPartitionUnreliable2B$ > ./logfiles/log$$number.log || true ;\
+		$(TEST_CLEAN); \
+		((number = number + 1)) ; \
+	done
 
 
 project2c:

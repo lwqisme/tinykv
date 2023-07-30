@@ -31,12 +31,12 @@ func (cb *Callback) WaitResp() *raft_cmdpb.RaftCmdResponse {
 	}
 }
 
-func (cb *Callback) WaitRespWithTimeout(timeout time.Duration) *raft_cmdpb.RaftCmdResponse {
+func (cb *Callback) WaitRespWithTimeout(timeout time.Duration,req *raft_cmdpb.RaftCmdRequest) *raft_cmdpb.RaftCmdResponse {
 	select {
 	case <-cb.done:
 		return cb.Resp
 	case <-time.After(timeout):
-		log.Infof("qq: timeout:%v, resp:%v", timeout, cb.Resp)
+		log.Infof("qq: timeout:%v, req:%v, resp:%v", timeout, req, cb.Resp)
 		return cb.Resp
 	}
 }

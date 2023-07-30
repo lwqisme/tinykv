@@ -83,30 +83,30 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 }
 
+// ApplyCommitedEntries 写数据库和读数据库最终的处理都在这里
 func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry) error {
-	wb := engine_util.WriteBatch{}
+	raftLogEntriesWb := engine_util.WriteBatch{}
 	// applyState := new(rspb.RaftApplyState)
+
+	if !d.IsLeader() {
+		d.proposals = make(map[uint64]*proposal)
+	}
 
 	// TODO：这里的 cbs 最好改成存储 proposals，因为我们处理完后需要从proposals中删除这部分的proposal
 	cbs := make(map[*message.Callback]bool, 0)
 	for _, ent := range committedEntrties {
-		// TODO: 这里的 AppliedIndex 更新应该是需要放到后面去一点，否则更新失败了的时候index就错了。
-		d.peerStorage.applyState.AppliedIndex = ent.Index
 		// TruncatedState 用于 2C ，所以暂时可以不用管。
-		// d.peerStorage.applyState.TruncatedState = new(rspb.RaftTruncatedState)
-		// d.peerStorage.applyState.TruncatedState.Index = ent.Index
-		// d.peerStorage.applyState.TruncatedState.Term = ent.Term
 
 		// 真正的运行 entries 里的命令！
 		// now execute the command in the committedEntries.
 		req := raft_cmdpb.Request{}
 		err := req.Unmarshal(ent.Data)
 		if err != nil {
-			return err
+			// return err
+			continue
 		}
 		// ent.Data 为0是 becomeLeader 或者更新 commit，并不算是一个错误
 		// 这种情况也不需要获取 proposal 去完成 callback
-		// TODO：还有一个情况，就是是 CmdType_Snap 的时候，
 		if len(ent.Data) == 0 {
 			continue
 		}
@@ -116,16 +116,52 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 
 		if proposal == nil {
 			// 非 leader 没有 proposal
-			log.Debugf("qq: id: %v, get nil proposal", d.PeerId())
+			if d.IsLeader() && req.CmdType == raft_cmdpb.CmdType_Put {
+				log.Infof("qq: isleader, id: %v, get nil proposal ,want apply put key:%s, put value:%s", d.PeerId(), string(req.Put.Key), string(req.Put.Value))
+			}
 		} else {
 			cbs[proposal.cb] = true
 		}
+
+		// 每一个循环只用一次，避免循环中同时出现 put 和 snap 导致没有及时写入数据库。
+		wb := engine_util.WriteBatch{}
 		switch req.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			log.Infof("qq: id:%v apply get index:%v", d.PeerId(), ent.Index)
+
+			get := req.Get
+			// TODO: CF 全部统统改为写入 KV 数据库
+			val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, get.Cf, get.Key)
+			if proposal != nil {
+				if err != nil {
+					proposal.cb.Done(ErrResp(err))
+					// return err
+					continue
+				}
+				resp := newCmdResp()
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Get,
+					Get: &raft_cmdpb.GetResponse{
+						Value: val,
+					},
+				})
+				proposal.cb.Resp = resp
+			}
+			if err != nil {
+				// return err
+				continue
+			}
 		case raft_cmdpb.CmdType_Put:
 			put := req.Put
 			wb.SetCF(put.Cf, put.Key, put.Value)
 			if string(put.Key) == "k1" {
 				log.Infof("qq: id: %v, put: %v", d.PeerId(), put)
+			}
+			log.Infof("qq: id:%v apply put value:%v, index:%v", d.PeerId(), string(put.Value), ent.Index)
+
+			err := wb.WriteToDB(d.peerStorage.Engines.Kv)
+			if err != nil {
+				panic("write batch entries data to db error!")
 			}
 			if proposal != nil {
 				resp := newCmdResp()
@@ -138,6 +174,12 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 		case raft_cmdpb.CmdType_Delete:
 			del := req.Delete
 			wb.DeleteCF(del.Cf, del.Key)
+			log.Infof("qq: id:%v apply delete value:%v, index:%v", d.PeerId(), string(del.Key), ent.Index)
+
+			err := wb.WriteToDB(d.peerStorage.Engines.Kv)
+			if err != nil {
+				panic("write batch entries data to db error!")
+			}
 			if proposal != nil {
 				resp := newCmdResp()
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
@@ -147,31 +189,46 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 				proposal.cb.Resp = resp
 			}
 		case raft_cmdpb.CmdType_Snap:
-			// TODO：这里我在上游并没有弄清楚 Snap 的职责，
-			// TODO：所以在 proposeRaftCommand 时直接返回了，不会走到这里
-			// if proposal != nil {
-			// 	proposal.cb.Resp.Responses = append(proposal.cb.Resp.Responses, &raft_cmdpb.Response{
-			// 		CmdType: raft_cmdpb.CmdType_Snap,
-			// 		Snap: &raft_cmdpb.SnapResponse{
-			// 			Region: d.Region(),
-			// 		},
-			// 	})
-			// }
+			// 即便是 Snap 我们也添加到了 entries 中，到了apply时才对其进行处理并且返回
+			log.Infof("qq: id:%v apply snap index:%v", d.PeerId(), ent.Index)
+
+			if proposal != nil {
+				resp := newCmdResp()
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+				})
+				proposal.cb.Resp = resp
+				proposal.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+				log.Infof("qq: id:%v leader set snap index:%v", d.PeerId(), ent.Index)
+			}
 		default:
 			errMsg := "error CmdType while executing committed entries"
 			log.Errorf(errMsg)
-			return fmt.Errorf(errMsg)
+			// return fmt.Errorf(errMsg)
+			continue
 		}
+		// TODO: 这里的 AppliedIndex 更新应该是需要放到后面去一点，否则更新失败了的时候index就错了。
+		d.peerStorage.applyState.AppliedIndex = ent.Index
+		raftLogEntriesWb.SetMeta(meta.RaftLogKey(d.regionId, ent.Index), &ent)
 	}
-	// TODO：应该不需要每一条都写入 applystate 吧？
-	err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+
+	// 如果这个有需要也可以放到 每一次循环当中去写数据库。
+	err := raftLogEntriesWb.WriteToDB(d.peerStorage.Engines.Raft)
+	if err != nil {
+		panic("write batch raft log entries to db error!")
+	}
+
+	applyStateWb := engine_util.WriteBatch{}
+	// TODO：应该不需要每一条都写入 applystate 吧？我只管写，好像现在也用不上在哪里读。
+	err = applyStateWb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 	if err != nil {
 		// panic("write batch write apply state error! error:")
 		return err
 	}
-	err = wb.WriteToDB(d.peerStorage.Engines.Kv)
+	err = applyStateWb.WriteToDB(d.peerStorage.Engines.Kv)
 	if err != nil {
-		panic("wirte batch apple state to db error!")
+		panic("wirte batch apply state to db error!")
 	}
 
 	// 目前认为，拥有 callback 的 entries 都是外部调用，经过MustPut进入系统。而如此进入系统的都是
@@ -251,11 +308,14 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 // proposeRaftCommand 不能直接操作数据库，其实是调用 Rawnode 中的 propose ，提出 raft 请求
 // 接收到了 request ，现在已经开始进行处理，只有 leader 才配处理 cmd ，所以此处必须是 leader
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	if !d.IsLeader() {
-		// log.Warnf("not header proposing raft command")
-	}
+	// if !d.IsLeader() {
+	// 	log.Warnf("qq: id:%v not header proposing raft command, requests:%v", d.PeerId(), msg.Requests)
+	// 	cb.Done(ErrResp(&util.ErrNotLeader{}))
+	// 	return
+	// }
 
 	// ErrStaleCommand is set here
+	// 这里面同时也检查了是否leader，不用在上面自己检查一遍了
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
 		cb.Done(ErrResp(err))
@@ -268,7 +328,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// cb.Resp.Responses = make([]*raft_cmdpb.Response, 0)
 	// cb.Resp.AdminResponse = nil // 这个目前我不清楚是做什么用的。
 
-	hasWrite := false
+	// hasWrite := false
 	// Your Code Here (2B).
 	// TODO：难道只有 leader 才配处理请求？
 	for _, req := range msg.Requests {
@@ -276,20 +336,34 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		case raft_cmdpb.CmdType_Get:
 			// TODO：GetCF 方法是在内部新建 txn ，如果错误不知道能不能正确释放，
 			// 如果出错需要考虑这里换为手动创建 txn。
-			val, err := engine_util.GetCF(d.peerStorage.Engines.Raft, req.Get.Cf, req.Get.Key)
+
+			// 通过 CF 获取的这一个逻辑实际上是独立的，有对 CF 进行操作的只有 apply 的时候(在上面的ApplyCommitted)以及这个 Get 的时候
+			// val, err := engine_util.GetCF(d.peerStorage.Engines.Raft, req.Get.Cf, req.Get.Key)
+			// if err != nil {
+			// 	cb.Done(ErrResp(err))
+			// 	return
+			// }
+			// resp := newCmdResp()
+			// resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+			// 	Get: &raft_cmdpb.GetResponse{
+			// 		Value: val,
+			// 	},
+			// })
+			// cb.Resp = resp
+			if d.RaftGroup.Raft.State != raft.StateLeader {
+				cb.Done(ErrResp(&util.ErrNotLeader{}))
+				return
+			}
+			data, err := req.Marshal()
 			if err != nil {
 				cb.Done(ErrResp(err))
 				return
 			}
-			resp := newCmdResp()
-			resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-				Get: &raft_cmdpb.GetResponse{
-					Value: val,
-				},
-			})
-			cb.Resp = resp
+
+			d.appendOneProposal(cb)
+			d.RaftGroup.Propose(data)
 		case raft_cmdpb.CmdType_Put:
-			hasWrite = true
+			// hasWrite = true
 			if d.RaftGroup.Raft.State != raft.StateLeader {
 				cb.Done(ErrResp(&util.ErrNotLeader{}))
 				return
@@ -312,7 +386,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			// ------------------------
 			d.RaftGroup.Propose(data)
 		case raft_cmdpb.CmdType_Delete:
-			hasWrite = true
+			// hasWrite = true
 			if d.RaftGroup.Raft.State != raft.StateLeader {
 				cb.Done(ErrResp(&util.ErrNotLeader{}))
 				return
@@ -333,22 +407,35 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			// ------------------------
 			d.RaftGroup.Propose(data)
 		case raft_cmdpb.CmdType_Snap:
-			// 接下来不知道干嘛
-			cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
-			resp := newCmdResp()
-			resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-				CmdType: raft_cmdpb.CmdType_Snap,
-				Snap: &raft_cmdpb.SnapResponse{
-					Region: d.Region(),
-				},
-			})
-			cb.Resp = resp
+			// 还是需要到apply那里把这个数据进行持久化之后再返回transaction
+
+			// cb.Txn = d.ctx.engine.Raft.NewTransaction(false)
+			// resp := newCmdResp()
+			// resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+			// 	CmdType: raft_cmdpb.CmdType_Snap,
+			// 	Snap: &raft_cmdpb.SnapResponse{
+			// 		Region: d.Region(),
+			// 	},
+			// })
+			// cb.Resp = resp
+			if d.RaftGroup.Raft.State != raft.StateLeader {
+				cb.Done(ErrResp(&util.ErrNotLeader{}))
+				return
+			}
+			data, err := req.Marshal()
+			if err != nil {
+				cb.Done(ErrResp(err))
+				return
+			}
+
+			d.appendOneProposal(cb)
+			d.RaftGroup.Propose(data)
 		default:
 		}
 	}
-	if !hasWrite {
-		cb.Done(cb.Resp)
-	}
+	// if !hasWrite {
+	// 	cb.Done(cb.Resp)
+	// }
 }
 
 // appendOneProposal 只有 leader 会调用到此方法
@@ -361,9 +448,11 @@ func (d *peerMsgHandler) appendOneProposal(cb *message.Callback) {
 		// 当发现之前已经保存过相同 index 的 proposal 的时候
 		if oldP.term >= newTerm {
 			cb.Done(ErrRespStaleCommand(oldP.term))
+			log.Errorf("qq: id:%v, oldP:%v win, newIndex:%v, newTerm:%v", d.PeerId(), oldP, newIndex, newTerm)
 			return
 		} else {
 			oldP.cb.Done(ErrRespStaleCommand(newTerm))
+			log.Errorf("qq: id:%v, oldP %v lose, newIndex:%v, newTerm:%v", d.PeerId(), oldP, newIndex, newTerm)
 		}
 	}
 	d.proposals[newIndex] = &proposal{

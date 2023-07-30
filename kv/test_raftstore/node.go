@@ -217,10 +217,12 @@ func (c *NodeSimulator) CallCommandOnStore(storeID uint64, request *raft_cmdpb.R
 	cb := message.NewCallback()
 	err := router.SendRaftCommand(request, cb)
 	if err != nil {
+		log.Errorf("qq: send raft command error, err:%v", err)
 		return nil, nil
 	}
 
-	resp := cb.WaitRespWithTimeout(timeout)
+	resp := cb.WaitRespWithTimeout(timeout, request)
+
 	// 运行到此处 timeout 超时了
 	return resp, cb.Txn
 }

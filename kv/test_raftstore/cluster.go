@@ -198,17 +198,17 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		}
 		if resp == nil {
 			// it should be timeouted innerly
-			log.Infof("qq: request type:%v, key %v no resp, retry %v.", cmdtype, string(key), i)
+			log.Errorf("qq: request type:%v, key %v no resp, retry %v.", cmdtype, string(key), i)
 			SleepMS(100)
 			continue
 		}
 		if resp.Header.Error != nil {
-			log.Infof("qq: request type:%v, key %v resp error:%v, retry %v.", cmdtype, string(key), resp, i)
+			log.Errorf("qq: request type:%v, key %v resp error:%v, retry %v.", cmdtype, string(key), resp, i)
 			SleepMS(100)
 			continue
 		}
 		if len(resp.Responses) == 0 {
-			log.Infof("qq: request type:%v, key %v resp.Res.response is nil:%v, retry %v.", cmdtype, string(key), resp, i)
+			log.Errorf("qq: request type:%v, key %v resp.Res.response is nil:%v, retry %v.", cmdtype, string(key), resp, i)
 		}
 		return resp, txn
 	}
@@ -235,6 +235,8 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
+
+			log.Infof("qq: can't call command %s on leader %d", request.String(), leader.GetId())
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
 				region, _, err := c.schedulerClient.GetRegionByID(context.TODO(), regionID)
@@ -252,6 +254,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		}
 		if resp.Header.Error != nil {
 			err := resp.Header.Error
+			// log.Errorf("qq: callCommand resp error, err:%v", err)
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
 				log.Debugf("encouter retryable err %+v", resp)
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
