@@ -235,48 +235,9 @@ func (l *RaftLog) AppendEntries(entries []pb.Entry, term uint64) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	// 假设 l.entries 是全部条目，则不需要分开判断
-	// var offset uint64
-	// if len(l.entries) == 0 {
-	// 	if l.stabled+1 == entries[0].Index {
-	// 		// 直接继续append
-	// 		l.entries = append(l.entries, entries...)
-	// 	} else {
-	// 		// 缺了一些，直接报错或者不管。
-	// 		return fmt.Errorf("missing log entry [last: %d, append at: %d]",
-	// 			l.stabled, entries[0].Index)
-	// 	}
-	// } else {
-	// 	offset = entries[0].Index - l.entries[0].Index
-	// 	if l.lastIndex+1 == entries[0].Index {
-	// 		// 直接继续append
-	// 		l.entries = append(l.entries, entries...)
-	// 	} else if l.lastIndex+1 > entries[0].Index {
-	// 		// 直接覆盖
-	// 		l.entries = l.entries[:offset]
-	// 		l.entries = append(l.entries, entries...)
-	// 	} else {
-	// 		// 缺了一些，直接报错或者不管
-	// 		return fmt.Errorf("missing log entry [last: %d, append at: %d]",
-	// 			l.lastIndex, entries[0].Index)
-	// 	}
-	// }
-	// l.lastIndex = l.LastIndex()
 
-	// offset := entries[0].Index - l.entries[0].Index
-	// if l.LastIndex()+1 == entries[0].Index {
-	// 	l.entries = append(l.entries, entries...)
-	// } else if l.LastIndex()+1 > entries[0].Index {
-	// 	l.entries = l.entries[:offset]
-	// 	l.entries = append(l.entries, entries...)
-	// } else {
-	// 	return fmt.Errorf("missing log entry [last: %d, append at: %d]",
-	// 		l.LastIndex(), entries[0].Index)
-	// }
-
-	// 这里难道 当本地的 entries 为空时，可以直接添加进去？\
+	// 这里难道 当本地的 entries 为空时，可以直接添加进去？
 	// 因为有可能冲突的条都已经持久化了，但是全都冲突了之后去获取 store 的，会获取到冲突的部分的。所以不用管，直接插入。
-	// TODO：这里需要验证
 	if len(l.entries) == 0 {
 		l.entries = append(l.entries, entries...)
 	} else if l.LastIndex()+1 == entries[0].Index {
@@ -320,7 +281,6 @@ func (l *RaftLog) DealConflict(term, index uint64) (isDel bool) {
 	ents := l.Entries(index, index+1)
 	// if len(ents) == 1 && ents[0].Term < term {
 	// 该函数的执行方是 Follower，所以一切以 leader 为准，只要和 leader 不相同的都删除。
-	// TODO：这里应该可是直接使用 l.Term
 	if len(ents) == 1 && ents[0].Term != term {
 		// 直接删除这一条index往后的所有条
 		if index <= l.stabled {

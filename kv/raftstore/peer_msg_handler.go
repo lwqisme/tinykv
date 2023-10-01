@@ -86,14 +86,15 @@ func (d *peerMsgHandler) HandleRaftReady() {
 // ApplyCommitedEntries 写数据库和读数据库最终的处理都在这里
 func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry) error {
 	raftLogEntriesWb := engine_util.WriteBatch{}
-	// applyState := new(rspb.RaftApplyState)
 
 	if !d.IsLeader() {
 		d.proposals = make(map[uint64]*proposal)
 	}
 
-	// TODO：这里的 cbs 最好改成存储 proposals，因为我们处理完后需要从proposals中删除这部分的proposal
+	// 一个callback可能对应了多个req，所以多个proposal可能指向同一个callback，所以这里我使用了map，避免重复的Callback.Done；
+	// 采用循环结束后再处理的方法一开始也是为了配合callback多request问题，但是改动可能有点大，具体的改动方法放在了Callback结构体内的注释，以后再改。
 	cbs := make(map[*message.Callback]bool, 0)
+
 	for _, ent := range committedEntrties {
 		// TruncatedState 用于 2C ，所以暂时可以不用管。
 
@@ -102,7 +103,6 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 		req := raft_cmdpb.Request{}
 		err := req.Unmarshal(ent.Data)
 		if err != nil {
-			// return err
 			continue
 		}
 		// ent.Data 为0是 becomeLeader 或者更新 commit，并不算是一个错误
@@ -115,7 +115,7 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 		proposal := d.proposals[ent.Index]
 
 		if proposal == nil {
-			// 非 leader 没有 proposal
+			// debug：leader没有proposal时打印日志
 			if d.IsLeader() && req.CmdType == raft_cmdpb.CmdType_Put {
 				log.Infof("qq: isleader, id: %v, get nil proposal ,want apply put key:%s, put value:%s", d.PeerId(), string(req.Put.Key), string(req.Put.Value))
 			}
@@ -130,7 +130,6 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 			log.Infof("qq: id:%v apply get index:%v", d.PeerId(), ent.Index)
 
 			get := req.Get
-			// TODO: CF 全部统统改为写入 KV 数据库
 			val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, get.Cf, get.Key)
 			if proposal != nil {
 				if err != nil {
@@ -208,7 +207,8 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 			// return fmt.Errorf(errMsg)
 			continue
 		}
-		// TODO: 这里的 AppliedIndex 更新应该是需要放到后面去一点，否则更新失败了的时候index就错了。
+		// 执行操作之后清楚proposal中对应的一条，key不存在也没关系，不会报错的
+		delete(d.proposals, ent.Index)
 		d.peerStorage.applyState.AppliedIndex = ent.Index
 		raftLogEntriesWb.SetMeta(meta.RaftLogKey(d.regionId, ent.Index), &ent)
 	}
@@ -220,7 +220,6 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 	}
 
 	applyStateWb := engine_util.WriteBatch{}
-	// TODO：应该不需要每一条都写入 applystate 吧？我只管写，好像现在也用不上在哪里读。
 	err = applyStateWb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 	if err != nil {
 		// panic("write batch write apply state error! error:")
@@ -231,9 +230,11 @@ func (d *peerMsgHandler) ApplyCommitedEntries(committedEntrties []eraftpb.Entry)
 		panic("wirte batch apply state to db error!")
 	}
 
+	// 为什么需要在全部结束之后再处理callback：
+	// 最初的意思是
 	// 目前认为，拥有 callback 的 entries 都是外部调用，经过MustPut进入系统。而如此进入系统的都是
 	// 一个 callback 对应一条 entry 的。所以可以直接对 callback 进行 Done。
-	for cb, _ := range cbs {
+	for cb := range cbs {
 		BindRespTerm(cb.Resp, d.Term())
 		cb.Done(cb.Resp)
 	}
@@ -308,48 +309,22 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 // proposeRaftCommand 不能直接操作数据库，其实是调用 Rawnode 中的 propose ，提出 raft 请求
 // 接收到了 request ，现在已经开始进行处理，只有 leader 才配处理 cmd ，所以此处必须是 leader
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	// if !d.IsLeader() {
-	// 	log.Warnf("qq: id:%v not header proposing raft command, requests:%v", d.PeerId(), msg.Requests)
-	// 	cb.Done(ErrResp(&util.ErrNotLeader{}))
-	// 	return
-	// }
-
 	// ErrStaleCommand is set here
+	// 只有leader配检查请求
 	// 这里面同时也检查了是否leader，不用在上面自己检查一遍了
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
 	}
-	// TODO：所以问题可能出在这里，就是每一次传入的时候我都直接设置了Respposes。
-	// 导致传出去的时候没有触发错误
-	// cb.Resp = new(raft_cmdpb.RaftCmdResponse)
-	// cb.Resp.Header = new(raft_cmdpb.RaftResponseHeader)
-	// cb.Resp.Responses = make([]*raft_cmdpb.Response, 0)
-	// cb.Resp.AdminResponse = nil // 这个目前我不清楚是做什么用的。
 
-	// hasWrite := false
 	// Your Code Here (2B).
-	// TODO：难道只有 leader 才配处理请求？
 	for _, req := range msg.Requests {
 		switch req.CmdType {
-		case raft_cmdpb.CmdType_Get:
+		case raft_cmdpb.CmdType_Get, raft_cmdpb.CmdType_Put, raft_cmdpb.CmdType_Delete, raft_cmdpb.CmdType_Snap:
 			// TODO：GetCF 方法是在内部新建 txn ，如果错误不知道能不能正确释放，
 			// 如果出错需要考虑这里换为手动创建 txn。
 
-			// 通过 CF 获取的这一个逻辑实际上是独立的，有对 CF 进行操作的只有 apply 的时候(在上面的ApplyCommitted)以及这个 Get 的时候
-			// val, err := engine_util.GetCF(d.peerStorage.Engines.Raft, req.Get.Cf, req.Get.Key)
-			// if err != nil {
-			// 	cb.Done(ErrResp(err))
-			// 	return
-			// }
-			// resp := newCmdResp()
-			// resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-			// 	Get: &raft_cmdpb.GetResponse{
-			// 		Value: val,
-			// 	},
-			// })
-			// cb.Resp = resp
 			if d.RaftGroup.Raft.State != raft.StateLeader {
 				cb.Done(ErrResp(&util.ErrNotLeader{}))
 				return
@@ -359,87 +334,18 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				cb.Done(ErrResp(err))
 				return
 			}
-
-			d.appendOneProposal(cb)
-			d.RaftGroup.Propose(data)
-		case raft_cmdpb.CmdType_Put:
-			// hasWrite = true
-			if d.RaftGroup.Raft.State != raft.StateLeader {
-				cb.Done(ErrResp(&util.ErrNotLeader{}))
-				return
-			}
-
-			data, err := req.Marshal()
+			err = d.appendOneProposal(cb)
 			if err != nil {
-				cb.Done(ErrResp(err))
-				return
+				continue
 			}
-			// TODO：在append之前需要检查是否有比 要加进去的index大的，或者term不一致的，
-			// TODO：此时需要将冲突部分cb结束并且清理，保持proposals的有序性！！
-			// d.proposals = append(d.proposals, &proposal{
-			// 	index: d.nextProposalIndex(), // 这个地方似乎并不能保证线程安全。
-			// 	term:  d.RaftGroup.Raft.Term,
-			// 	cb:    cb,
-			// })
-			// ------------------------
-			d.appendOneProposal(cb)
-			// ------------------------
-			d.RaftGroup.Propose(data)
-		case raft_cmdpb.CmdType_Delete:
-			// hasWrite = true
-			if d.RaftGroup.Raft.State != raft.StateLeader {
-				cb.Done(ErrResp(&util.ErrNotLeader{}))
-				return
-			}
-
-			data, err := req.Marshal()
-			if err != nil {
-				cb.Done(ErrResp(err))
-				return
-			}
-			// d.proposals = append(d.proposals, &proposal{
-			// 	index: d.nextProposalIndex(), // 这个地方似乎并不能保证线程安全。
-			// 	term:  d.RaftGroup.Raft.Term,
-			// 	cb:    cb,
-			// })
-			// ------------------------
-			d.appendOneProposal(cb)
-			// ------------------------
-			d.RaftGroup.Propose(data)
-		case raft_cmdpb.CmdType_Snap:
-			// 还是需要到apply那里把这个数据进行持久化之后再返回transaction
-
-			// cb.Txn = d.ctx.engine.Raft.NewTransaction(false)
-			// resp := newCmdResp()
-			// resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-			// 	CmdType: raft_cmdpb.CmdType_Snap,
-			// 	Snap: &raft_cmdpb.SnapResponse{
-			// 		Region: d.Region(),
-			// 	},
-			// })
-			// cb.Resp = resp
-			if d.RaftGroup.Raft.State != raft.StateLeader {
-				cb.Done(ErrResp(&util.ErrNotLeader{}))
-				return
-			}
-			data, err := req.Marshal()
-			if err != nil {
-				cb.Done(ErrResp(err))
-				return
-			}
-
-			d.appendOneProposal(cb)
 			d.RaftGroup.Propose(data)
 		default:
 		}
 	}
-	// if !hasWrite {
-	// 	cb.Done(cb.Resp)
-	// }
 }
 
 // appendOneProposal 只有 leader 会调用到此方法
-func (d *peerMsgHandler) appendOneProposal(cb *message.Callback) {
+func (d *peerMsgHandler) appendOneProposal(cb *message.Callback) error {
 	newIndex := d.nextProposalIndex()
 	newTerm := d.RaftGroup.Raft.Term
 
@@ -449,7 +355,7 @@ func (d *peerMsgHandler) appendOneProposal(cb *message.Callback) {
 		if oldP.term >= newTerm {
 			cb.Done(ErrRespStaleCommand(oldP.term))
 			log.Errorf("qq: id:%v, oldP:%v win, newIndex:%v, newTerm:%v", d.PeerId(), oldP, newIndex, newTerm)
-			return
+			return errors.Errorf("duplicated propose")
 		} else {
 			oldP.cb.Done(ErrRespStaleCommand(newTerm))
 			log.Errorf("qq: id:%v, oldP %v lose, newIndex:%v, newTerm:%v", d.PeerId(), oldP, newIndex, newTerm)
@@ -460,6 +366,7 @@ func (d *peerMsgHandler) appendOneProposal(cb *message.Callback) {
 		term:  newTerm,
 		cb:    cb,
 	}
+	return nil
 }
 
 func (d *peerMsgHandler) onTick() {

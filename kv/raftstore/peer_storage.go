@@ -306,12 +306,11 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
+// TODO：删除不会提交的记录 what's "delete log entries that will never be committed" 哪有东西可删，删数据库吗？
 // 将 entries 里的东西放到 writeBatch 里，并且更新 raftState
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
-
 	// Your Code Here (2B).
 	// 数据写入数据库并且更新本地的 state
-	// TODO：需要判断是否连续
 	for _, ent := range entries {
 		err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent)
 		if err != nil {

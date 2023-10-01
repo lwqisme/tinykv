@@ -12,6 +12,7 @@ type Callback struct {
 	Resp *raft_cmdpb.RaftCmdResponse
 	Txn  *badger.Txn // used for GetSnap
 	done chan struct{}
+	// TODO request批量这个事情，有可能一个callback对应好几个request/entities，其实可以在callback当中做一个计数，处理完一个，就append到resp当中一个，达到计数之后才执行done，而不是每一个request结束都进行done。
 }
 
 func (cb *Callback) Done(resp *raft_cmdpb.RaftCmdResponse) {

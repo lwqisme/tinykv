@@ -101,12 +101,20 @@ unreliable2b:
 manytimes:
 	number=1 ; while [[ $$number -le 10 ]] ; do \
 		echo $$number ; \
+		rm -f ./logfiles/log$$number.log; \
 		$(TEST_CLEAN); \
 		$(GOTEST) ./kv/test_raftstore -run ^TestPersistPartitionUnreliable2B$ > ./logfiles/log$$number.log || true ;\
 		$(TEST_CLEAN); \
 		((number = number + 1)) ; \
 	done
 
+multiProject2b:
+	number=1 ; while [[ $$number -le 3 ]] ; do \
+		echo $$number ; \
+		rm -f ./logfiles/log$$number.log; \
+		make project2b > ./logfiles/log$$number.log; \
+		((number = number + 1)) ; \
+	done
 
 project2c:
 	$(TEST_CLEAN)

@@ -245,7 +245,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 
 	entries := r.RaftLog.Entries(toProgress.Next, r.RaftLog.LastIndex()+1)
-	// TODO：要不要考虑 发出去之后马上更新 Next ？目前接收信息时修改。
 	entriesPointers := make([]*pb.Entry, 0)
 	for i := 0; i < len(entries); i++ {
 		entriesPointers = append(entriesPointers, &entries[i])
@@ -347,7 +346,6 @@ func (r *Raft) becomeCandidate() {
 	r.State = StateCandidate
 	r.Term++
 	r.Vote = r.id
-	// TODO：这里应该是需要先清空一下 votes 以及 voteRejects
 	r.votes = make(map[uint64]bool, 0)
 	r.voteRejects = make(map[uint64]bool, 0)
 
@@ -409,7 +407,6 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	// TODO：问题比较大，有的情况可能不需要
 	if m.Term > r.Term && r.State != StateFollower {
 		// 其实也不清楚是否所有情况都需要马上转换为 follower
 		// lead := uint64(0)
@@ -475,11 +472,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 	reject := false
-	// 如果两者在同一个Term，那么被Append的作为follower
-	// TODO：如果这个后来的也恰好接收到一个Append请求怎么办呢？
+	// 如果两者在同一个Term，那么被Append的不应该作出任何反应
 	if m.Term == r.Term && r.State == StateCandidate {
 		log.Infof("qq: a msg type:%v from %v let %v terns into follower", m.MsgType, m.From, r.id)
-		r.becomeFollower(m.Term, m.From)
+		// r.becomeFollower(m.Term, m.From)
 		return
 	}
 
@@ -488,32 +484,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.LogTerm != 0 {
 		t, err := r.RaftLog.Term(m.Index)
 		if err != nil {
-			// return
 			reject = true
 		}
 		if t != m.LogTerm {
 			reject = true
 		}
-	}
-	if !reject {
-		// if len(m.Entries) > 0 && m.Entries[0].Index <= r.RaftLog.LastIndex() {
-		// 	// 如果发现有冲突，并且term更高，那么把冲突 index (不包括index) 以后的记录都删除。
-		// 	del := r.RaftLog.DealConflict(m.Entries[0].Term, m.Entries[0].Index)
-		// 	if !del && m.Entries[0].Index < r.RaftLog.LastIndex() { // 没有冲突
-	}
-	if !reject {
-		// if len(m.Entries) > 0 && m.Entries[0].Index <= r.RaftLog.LastIndex() {
-		// 	// 如果发现有冲突，并且term更高，那么把冲突 index (不包括index) 以后的记录都删除。
-		// 	del := r.RaftLog.DealConflict(m.Entries[0].Term, m.Entries[0].Index)
-		// 	if !del && m.Entries[0].Index < r.RaftLog.LastIndex() { // 没有冲突
-
-		// ------------------------------------------------------------------
-		// TODO：为什么不用 RaftLog.Term() ?
-		// 检查前置log是否一致，不一致则拒绝。
-		// ents := r.RaftLog.Entries(m.Index, m.Index+1)
-		// if (len(ents) == 1 && ents[0].Term != m.LogTerm) || len(ents) != 1 {
-		// 	reject = true
-		// }
 	}
 	if !reject {
 		ents := []pb.Entry{}
@@ -533,8 +508,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			return
 		}
 
+		// commit 的差距会被上面的处理冲突逻辑处理掉。
 		if m.Commit > r.RaftLog.committed {
-			// TODO：如果 commit 跳过了一些条目，按理来说应该返回错误。
 			r.RaftLog.committed = min(m.Commit, lastNewIndex)
 			// r.RaftLog.applied = r.RaftLog.committed
 		}
@@ -641,9 +616,8 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	reject := false
-	// leader不做响应
+	// 外部已经处理了term落后的情况，此处term不会落后。leader不做响应
 	if r.State == StateLeader {
-		// TODO：这里应该需要判断一下来源的
 		return
 	}
 
@@ -656,27 +630,11 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 			r.becomeFollower(m.Term, m.From)
 			r.RaftLog.committed = m.Commit
 		} else { // follower
-			// if m.Term > r.Term {
 			r.Lead = m.From
-			// }
 		}
 	} else if m.Term < r.Term { // 当 m.Term <= r.Term 时，代表 heartbeat 是过时的或者正在进行时
 		return
 	}
-
-	// 判断来源的 heartbeat 是否up-to-date
-	// TODO：TestLeaderBcastBeat2AA 要求 消息的 LogTerm 以及 Index 都为0
-	// TODO：和 TestCommitWithHeartbeat2AB 冲突了
-	// TODO：和 TestHeartbeatUpdateCommit2AB 冲突了
-	// switch r.isUpToDate(m.LogTerm, m.Index) {
-	// case newer, older:
-	// 	reject = true
-	// case equal:
-	// 	reject = false
-	// }
-	// if m.Commit > r.RaftLog.committed {
-	// 	r.RaftLog.committed = m.Commit
-	// }
 
 	r.electionElapsed = 0 // 然后需要将election倒计时重置
 
@@ -728,19 +686,6 @@ func (r *Raft) isUpToDate(logTerm, logIndex uint64) int {
 		}
 	}
 
-	// ents := r.RaftLog.Entries(logIndex, logIndex+1)
-
-	// if (len(ents) == 1 && (logTerm < ents[0].Term || (logTerm == ents[0].Term && logIndex < lastIndex))) ||
-	// 	(len(ents) == 0 && (logTerm < lastTerm)) {
-	// 	// 来源不是 up-to-date
-	// 	log.Infof("qq: fromLogIndex not up to date, fromLogTerm:%v, fromLogIndex:%v, ents:%v", logTerm, logIndex, ents)
-	// 	return older
-	// } else if len(ents) == 1 && logIndex == lastIndex && logTerm == ents[0].Term {
-	// 	// 传入的 term, index 与本地最新的是相同的
-	// 	return equal
-	// } else {
-	// 	return newer
-	// }
 	if logTerm < lastTerm || (logTerm == lastTerm && logIndex < lastIndex) {
 		log.Infof("qq: not up to date, logTerm:%v lastTerm:%v logIndex:%v lastIndex:%v", logTerm, lastTerm, logIndex, lastIndex)
 		return older
@@ -769,67 +714,14 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	// 接收到的msg的Term比自己的要低，则拒绝投票，Reject为true。
 	// 接收到的msg的Term比自己的要高，则自己变身为follower，跟随那个leader。
 	reject := false
-	// ---------------------------------------------------------------------------
-	// if r.State == StateCandidate || r.State == StateLeader {
-	// 	reject = true
-	// 	if m.Term < r.Term {
 
-	// 	} else if m.Term > r.Term {
-	// 		r.becomeFollower(m.Term, m.From)
-	// 		// 还需要同步log的进度
-	// 		// TODO：是否需要 reject 呢？
-	// 	}
-	// } else {
-	// 	switch r.isUpToDate(m.LogTerm, m.Index) {
-	// 	case older:
-	// 		reject = true
-	// 		log.Infof("qq: id:%v reject vote because not uptodate", r.id)
-	// 	default:
-	// 		reject = false
-	// 	}
-
-	// 	// follower接收到。需要判断别人的term或者日志index是否大于我本地的，
-	// 	// 如果是，那么则同意投票；否则不同意投票
-	// 	// TODO: 我不清楚这里的 index 对比是否可以去掉了？因为上面的isUpToDate已经对比过了
-	// 	// lastIndex := r.RaftLog.LastIndex()
-	// 	// if !reject && (m.Term > r.Term || (m.Term == r.Term && m.Index >= lastIndex)) {
-	// 	if !reject && (m.Term >= r.Term) {
-	// 		// 按照term去进行划分。如果follower的term被更新为更高的值，那么 r.Vote 将被重置。
-	// 		// ↑但是我把 step 方法中的 becomeFollower 去掉了，所以没有重置 r.Vote
-	// 		if m.Term > r.Term {
-	// 			r.Vote = 0
-	// 		}
-	// 		// 最近没有投过其他的。
-	// 		// 这个Vote重置是在接收到了正确的heartbeat之后重置的。
-	// 		if r.Vote == 0 {
-	// 			reject = false
-	// 			r.Vote = m.From
-	// 			// r.electionElapsed = 0
-	// 		} else if r.Vote == m.From {
-	// 			reject = false
-	// 			// r.electionElapsed = 0
-	// 		} else {
-	// 			reject = true
-	// 			log.Infof("qq: id:%v reject vote because just vote other peer:%v", r.id, r.Vote)
-	// 		}
-	// 	} else {
-	// 		if reject {
-	// 			log.Infof("qq: id:%v reject vote because the from term:%v smaller than mine:%v", r.id, m.Term, r.Term)
-	// 		}
-	// 		reject = true
-	// 	}
-	// }
-
-	// --------------------------------以上是旧逻辑-------------------------------------------
 	if r.State == StateCandidate || r.State == StateLeader {
 		reject = true
-		if m.Term < r.Term {
-
-		} else if m.Term > r.Term {
+		if m.Term > r.Term {
 			log.Infof("qq: a msg type:%v from %v let %v terns into follower", m.MsgType, m.From, r.id)
 			r.becomeFollower(m.Term, m.From)
 			// 还需要同步log的进度
-			// TODO：是否需要 reject 呢？
+			// 这里reject设置了之后，在方法的最后会返回log进度的了
 		}
 	}
 
@@ -843,9 +735,6 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 
 	// follower接收到。需要判断别人的term或者日志index是否大于我本地的，
 	// 如果是，那么则同意投票；否则不同意投票
-	// TODO: 我不清楚这里的 index 对比是否可以去掉了？因为上面的isUpToDate已经对比过了
-	// lastIndex := r.RaftLog.LastIndex()
-	// if !reject && (m.Term > r.Term || (m.Term == r.Term && m.Index >= lastIndex)) {
 	if !reject && (m.Term >= r.Term) {
 		// 按照term去进行划分。如果follower的term被更新为更高的值，那么 r.Vote 将被重置。
 		// ↑但是我把 step 方法中的 becomeFollower 去掉了，所以没有重置 r.Vote
@@ -913,7 +802,6 @@ func (r *Raft) handleResponseVote(m pb.Message) error {
 			r.becomeLeader()
 			r.bcastAppend()
 		}
-		// TODO：这块抽象出来可以用来处理Hup
 	}
 	return nil
 }
@@ -977,13 +865,9 @@ func (r *Raft) redirctPropose(m pb.Message) error {
 	m.From = r.id // 重新设置sender
 	m.To = r.Lead // 重新设置目标
 
-	sto := r.RaftLog.storage
-
 	var err error
-	// TODO：这里我不好说要不要改成使用 r.RaftLog.Storage.LastIndex()
-	// TODO：因为在 doc.go 当中说明了需要使用 HardState 中的数据覆盖 msg 中的变量
-	lastIndex := r.RaftLog.LastIndex()
-	m.Term, err = sto.Term(lastIndex)
+	hs, _, err := r.RaftLog.storage.InitialState()
+	m.Term = hs.Term;
 	if err != nil {
 		return err
 	}
